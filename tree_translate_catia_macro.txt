@@ -1,0 +1,272 @@
+' Language: VBScript
+' Identifier: translate_with_deepseek.catvbs
+' Description: CATIA V6 AI Translation Macro
+Option Explicit
+' --- CONFIGURATION ---
+Const API_KEY = "ENTER YOUR API KEY HERE"
+Const API_URL = "https://api.deepseek.com/chat/completions"
+' Attributes to translate
+Dim PLM_ATTRIBUTES_TO_TRANSLATE
+PLM_ATTRIBUTES_TO_TRANSLATE = Array("V_Name", "V_description")
+' ---------------------
+Dim processedCount
+processedCount = 0
+Sub CATMain()
+    On Error Resume Next
+    Dim oEditor
+    Set oEditor = CATIA.ActiveEditor
+    
+    If oEditor Is Nothing Then
+        MsgBox "No active editor found.", vbCritical, "Error"
+        Exit Sub
+    End If
+    Dim oProdService
+    Set oProdService = oEditor.GetService("PLMProductService")
+    
+    Dim oRootOcc
+    Set oRootOcc = oProdService.RootOccurrence
+    
+    If oRootOcc Is Nothing Then
+        MsgBox "Could not retrieve Root Occurrence.", vbCritical, "Error"
+        Exit Sub
+    End If
+    
+    processedCount = 0
+    
+    TranslateOccurrence oRootOcc
+    
+    MsgBox "Translation completed. " & processedCount & " items processed.", vbInformation, "Success"
+End Sub
+Sub TranslateOccurrence(oOcc)
+    On Error Resume Next
+    
+    Dim attr
+    
+    ' 1. Translate Instance
+    Dim oInst
+    Set oInst = Nothing
+    
+    If TypeName(oOcc) <> "VPMRootOccurrence" Then
+        Set oInst = oOcc.InstanceOccurrenceOf
+    End If
+    
+    If Not oInst Is Nothing Then
+        For Each attr In PLM_ATTRIBUTES_TO_TRANSLATE
+            TranslatePLMEntity oInst, attr
+        Next
+        TranslatePLMEntity oInst, "PLM_ExternalID"
+        CheckAndRename oInst
+    End If
+    
+    ' 2. Translate Reference
+    Dim oRef
+    Set oRef = Nothing
+    
+    If TypeName(oOcc) = "VPMRootOccurrence" Then
+        Set oRef = oOcc.ReferenceRootOccurrenceOf
+    Else
+        If Not oInst Is Nothing Then
+             Set oRef = oInst.ReferenceInstanceOf
+        End If
+    End If
+    
+    If Not oRef Is Nothing Then
+        For Each attr In PLM_ATTRIBUTES_TO_TRANSLATE
+            TranslatePLMEntity oRef, attr
+        Next
+        
+        ' 3. Representations
+        Dim oRepInsts
+        Set oRepInsts = oRef.RepInstances
+        
+        If Not oRepInsts Is Nothing Then
+            Dim i, oRepInst, oRepRef
+            For i = 1 To oRepInsts.Count
+                Set oRepInst = oRepInsts.Item(i)
+                Set oRepRef = oRepInst.ReferenceInstanceOf
+                
+                For Each attr In PLM_ATTRIBUTES_TO_TRANSLATE
+                    TranslatePLMEntity oRepInst, attr
+                Next
+                TranslatePLMEntity oRepInst, "PLM_ExternalID"
+                CheckAndRename oRepInst
+                
+                For Each attr In PLM_ATTRIBUTES_TO_TRANSLATE
+                    TranslatePLMEntity oRepRef, attr
+                Next
+                
+                Dim oPart
+                Set oPart = Nothing
+                Set oPart = oRepRef.GetItem("Part")
+                
+                If Not oPart Is Nothing Then
+                    ProcessPart oPart
+                End If
+            Next
+        End If
+    End If
+    
+    ' 4. Children
+    Dim oChildren
+    Set oChildren = oOcc.Occurrences
+    Dim j
+    For j = 1 To oChildren.Count
+        TranslateOccurrence oChildren.Item(j)
+    Next
+End Sub
+Sub ProcessPart(oPart)
+    On Error Resume Next
+    
+    ' Origin Elements
+    Dim oOriginElements
+    Set oOriginElements = oPart.OriginElements
+    If Not oOriginElements Is Nothing Then
+        Dim k
+        For k = 1 To oOriginElements.Count
+             CheckAndRename oOriginElements.Item(k)
+        Next
+    End If
+    
+    ' Axis Systems
+    Dim oAxisSystems
+    Set oAxisSystems = oPart.AxisSystems
+    If Not oAxisSystems Is Nothing Then
+        Dim l
+        For l = 1 To oAxisSystems.Count
+            CheckAndRename oAxisSystems.Item(l)
+        Next
+    End If
+    
+    ' Bodies
+    Dim oBodies, oBody, oShape
+    Set oBodies = oPart.Bodies
+    If Not oBodies Is Nothing Then
+        For Each oBody In oBodies
+            CheckAndRename oBody
+            For Each oShape In oBody.Shapes
+                CheckAndRename oShape
+            Next
+        Next
+    End If
+    
+    ' HybridBodies
+    Dim oHybBodies, oHybBody
+    Set oHybBodies = oPart.HybridBodies
+    If Not oHybBodies Is Nothing Then
+        For Each oHybBody In oHybBodies
+            CheckAndRename oHybBody
+            ProcessHybridBody oHybBody 
+        Next
+    End If
+    
+    ' Ordered Geometrical Sets
+    Dim oOrdGeoSets, oOrdGeoSet
+    Set oOrdGeoSets = oPart.OrderedGeometricalSets
+    If Not oOrdGeoSets Is Nothing Then
+        For Each oOrdGeoSet In oOrdGeoSets
+            CheckAndRename oOrdGeoSet
+            ProcessOrderedGeoSet oOrdGeoSet
+        Next
+    End If
+End Sub
+Sub ProcessHybridBody(oHybBody)
+    On Error Resume Next
+    CheckAndRename oHybBody
+    
+    Dim oHybShapes, oShape
+    Set oHybShapes = oHybBody.HybridShapes
+    For Each oShape In oHybShapes
+        CheckAndRename oShape
+    Next
+    
+    Dim oNestedSets, oNested
+    Set oNestedSets = oHybBody.HybridBodies
+    For Each oNested In oNestedSets
+        ProcessHybridBody oNested
+    Next
+End Sub
+Sub ProcessOrderedGeoSet(oOrdGeoSet)
+    On Error Resume Next
+    CheckAndRename oOrdGeoSet
+    
+    Dim oNestedSets, oNested
+    Set oNestedSets = oOrdGeoSet.OrderedGeometricalSets
+    For Each oNested In oNestedSets
+        ProcessOrderedGeoSet oNested
+    Next
+End Sub
+Sub TranslatePLMEntity(oEntity, attrName)
+    On Error Resume Next
+    Dim currentVal
+    currentVal = oEntity.GetAttributeValue(attrName)
+    
+    If Err.Number <> 0 Then 
+        Err.Clear
+        Exit Sub
+    End If
+    
+    If Len(currentVal) > 1 And Not IsNumeric(currentVal) Then 
+        Dim newVal
+        newVal = CallDeepSeekAPI(currentVal)
+        If newVal <> "" And newVal <> currentVal Then
+            oEntity.SetAttributeValue attrName, newVal
+            processedCount = processedCount + 1
+        End If
+    End If
+End Sub
+Sub CheckAndRename(oObj)
+    On Error Resume Next
+    Dim currentName
+    currentName = oObj.Name
+    
+    If Len(currentName) > 1 And Not IsNumeric(currentName) Then
+        Dim newName
+        newName = CallDeepSeekAPI(currentName)
+        If newName <> "" And newName <> currentName Then
+            oObj.Name = newName
+            processedCount = processedCount + 1
+        End If
+    End If
+End Sub
+Function CallDeepSeekAPI(textToTranslate)
+    On Error Resume Next
+    CallDeepSeekAPI = ""
+    
+    If Trim(textToTranslate) = "" Then Exit Function
+    
+    Dim objHTTP
+    Set objHTTP = CreateObject("MSXML2.XMLHTTP")
+    
+    objHTTP.Open "POST", API_URL, False
+    objHTTP.setRequestHeader "Content-Type", "application/json"
+    objHTTP.setRequestHeader "Authorization", "Bearer " & API_KEY
+    
+    Dim safeText
+    safeText = Replace(textToTranslate, """", "\""")
+    safeText = Replace(safeText, vbCrLf, " ")
+    safeText = Replace(safeText, vbCr, " ")
+    safeText = Replace(safeText, vbLf, " ")
+    
+    Dim strJson
+    strJson = "{""model"": ""deepseek-chat"", ""messages"": [{""role"": ""system"", ""content"": ""You are an expert mechanical automotive design engineer. Ensure everything is in English. Translate any non-English technical terminology to English. If already English, return as is. Output ONLY the result.""}, {""role"": ""user"", ""content"": """ & safeText & """}]}"
+    
+    objHTTP.send strJson
+    
+    If objHTTP.Status = 200 Then
+        Dim responseText
+        responseText = objHTTP.responseText
+        
+        Dim p1, p2
+        p1 = InStr(responseText, """content"":""")
+        If p1 > 0 Then
+            p1 = p1 + 11 
+            p2 = InStr(p1, responseText, """")
+            If p2 > p1 Then
+                CallDeepSeekAPI = Mid(responseText, p1, p2 - p1)
+                CallDeepSeekAPI = Replace(CallDeepSeekAPI, "\n", "")
+                CallDeepSeekAPI = Replace(CallDeepSeekAPI, "\""", """")
+            End If
+        End If
+    End If
+    Set objHTTP = Nothing
+End Function
